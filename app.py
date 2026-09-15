@@ -2,7 +2,8 @@ import streamlit as st
 import pdfplumber
 import re
 import pandas as pd
-from playwright.sync_api import sync_playwright
+import requests
+from bs4 import BeautifulSoup
 
 st.title("ই-চালান স্বয়ংক্রিয় ভেরিফিকেশন ও এক্সেল জেনারেটর")
 
@@ -29,43 +30,49 @@ if uploaded_file is not None:
         progress_bar = st.progress(0)
         results = []
         
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context()
-            page = context.new_page()
-            
-            for idx, chl in enumerate(challans):
-                url = f"https://challanverification.finance.gov.bd/echalan/details.php?challanNo={chl}"
-                try:
-                    page.goto(url, timeout=30000)
-                    page.wait_for_timeout(1500)
-                    
-                    # ওয়েবসাইটের কলাম থেকে তথ্য সংগ্রহ
-                    collector = page.locator("table tr td:nth-child(2)").inner_text()
-                    payer = page.locator("table tr td:nth-child(3)").inner_text()
-                    section = page.locator("table tr td:nth-child(5)").inner_text()
-                    
-                    results.append({
-                        "চালান নং": chl,
-                        "যার মাধ্যমে টাকা আদায় হয়েছে (নাম ও সনাক্তকরণ)": collector.strip(),
-                        "যার পক্ষ হতে টাকা আদায় হয়েছে (নাম ও ঠিকানা)": payer.strip(),
-                        "যে ধারায় আদায় হয়েছে": section.strip()
-                    })
-                except Exception as e:
-                    results.append({
-                        "চালান নং": chl,
-                        "যার মাধ্যমে টাকা আদায় হয়েছে (নাম ও সনাক্তকরণ)": "N/A",
-                        "যার পক্ষ হতে টাকা আদায় হয়েছে (নাম ও ঠিকানা)": "N/A",
-                        "যে ধারায় আদায় হয়েছে": "Error/Not Found"
-                    })
+        # Requests Session চালুকরণ
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        
+        for idx, chl in enumerate(challans):
+            url = f"https://challanverification.finance.gov.bd/echalan/details.php?challanNo={chl}"
+            try:
+                response = session.get(url, timeout=15)
+                response.encoding = 'utf-8'
+                soup = BeautifulSoup(response.text, 'html.parser')
                 
-                progress_bar.progress((idx + 1) / len(challans))
-            browser.close()
+                # চালানের টেবিল থেকে কলামগুলো বের করা
+                tds = soup.find_all('td')
+                
+                # কলাম ডাটা নিরাপদভাবে এক্সট্র্যাক্ট করা
+                collector = tds[1].get_text(strip=True) if len(tds) > 1 else "N/A"
+                payer = tds[2].get_text(strip=True) if len(tds) > 2 else "N/A"
+                section = tds[4].get_text(strip=True) if len(tds) > 4 else "N/A"
+                
+                results.append({
+                    "চালান নং": chl,
+                    "যার মাধ্যমে টাকা আদায় হয়েছে (নাম ও সনাক্তকরণ)": collector,
+                    "যার পক্ষ হতে টাকা আদায় হয়েছে (নাম ও ঠিকানা)": payer,
+                    "যে ধারায় আদায় হয়েছে": section
+                })
+            except Exception as e:
+                results.append({
+                    "চালান নং": chl,
+                    "যার মাধ্যমে টাকা আদায় হয়েছে (নাম ও সনাক্তকরণ)": "N/A",
+                    "যার পক্ষ হতে টাকা আদায় হয়েছে (নাম ও ঠিকানা)": "N/A",
+                    "যে ধারায় আদায় হয়েছে": "Error/Not Found"
+                })
+            
+            progress_bar.progress((idx + 1) / len(challans))
             
         # এক্সেল ফাইল প্রস্তুতকরণ
         df = pd.DataFrame(results)
         excel_file = "Challan_Verification_Report.xlsx"
         df.to_excel(excel_file, index=False)
+        
+        st.success("সকল চালান ভেরিফিকেশন সম্পন্ন হয়েছে!")
         
         with open(excel_file, "rb") as f:
             st.download_button(
