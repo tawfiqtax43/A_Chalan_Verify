@@ -5,57 +5,80 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 
-st.title("ই-চালান স্বয়ংক্রিয় ভেরিফিকেশন ও এক্সেল জেনারেটর")
+st.title("এ-চালান ভেরিফাই")
+st.subheader("কর অঞ্চল-৩ (চট্টগ্রাম)")
 
 uploaded_file = st.file_uploader("আপনার PDF ফাইলটি আপলোড করুন", type=["pdf"])
 
+session = requests.Session()
+adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+session.mount('https://', adapter)
+session.mount('http://', adapter)
+
+headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Content-Type': 'application/x-www-form-urlencoded'
+}
+
 def fetch_single_challan(chl):
-    url = f"https://challanverification.finance.gov.bd/echalan/details.php?challanNo={chl}"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5'
-    }
+    # চালান নম্বরকে ২ ভাগে ভাগ করা (যেমন: 2627 এবং বাকি অংশ)
+    parts = chl.split('-')
+    if len(parts) == 2:
+        c1, c2 = parts[0], parts[1]
+    else:
+        c1, c2 = chl[:4], chl[4:].replace('-', '')
+
+    url = "https://challanverification.finance.gov.bd/echalan/details.php"
     
-    # ৩ বার চেষ্টা করবে যদি সার্ভার স্লো থাকে
-    for attempt in range(3):
+    # ফর্মের ইনপুট ডাটা তৈরি (সরাসরি আপনার মার্ক করা ফর্মের সাবমিশন)
+    payload = {
+        'c1': c1,
+        'c2': c2,
+        'challanNo': chl,
+        'btnVerify': 'Verify'
+    }
+
+    for attempt in range(2):
         try:
-            response = requests.get(url, headers=headers, timeout=20)
-            if response.status_code == 200 and len(response.text) > 500:
+            # POST এবং GET দুটো পদ্ধতিই হ্যান্ডেল করবে
+            response = session.post(url, data=payload, headers=headers, timeout=8)
+            if response.status_code != 200 or len(response.text) < 300:
+                response = session.get(f"{url}?challanNo={chl}&c1={c1}&c2={c2}", headers=headers, timeout=8)
+
+            if response.status_code == 200:
                 response.encoding = 'utf-8'
                 soup = BeautifulSoup(response.text, 'html.parser')
-                
                 tds = soup.find_all('td')
                 
+                # ওয়েবসাইট থেকে ডাটা পড়া
                 if len(tds) >= 4:
                     collector = tds[1].get_text(strip=True)
                     payer = tds[2].get_text(strip=True)
                     section = tds[4].get_text(strip=True) if len(tds) > 4 else tds[3].get_text(strip=True)
                     
-                    return {
-                        "চালান নং": chl,
-                        "যার মাধ্যমে টাকা আদায় হয়েছে (নাম ও সনাক্তকরণ)": collector if collector else "N/A",
-                        "যার পক্ষ হতে টাকা আদায় হয়েছে (নাম ও ঠিকানা)": payer if payer else "N/A",
-                        "যে ধারায় আদায় হয়েছে": section if section else "N/A"
-                    }
-            time.sleep(1) # চেষ্টা ব্যর্থ হলে ১ সেকেন্ড অপেক্ষা
+                    if collector or payer:
+                        return {
+                            "চালান নং": chl,
+                            "যার মাধ্যমে টাকা আদায় হয়েছে (নাম ও সনাক্তকরণ)": collector if collector else "N/A",
+                            "যার পক্ষ হতে টাকা আদায় হয়েছে (নাম ও ঠিকানা)": payer if payer else "N/A",
+                            "যে ধারায় আদায় হয়েছে": section if section else "N/A"
+                        }
         except Exception:
-            time.sleep(1)
+            pass
             
     return {
         "চালান নং": chl,
         "যার মাধ্যমে টাকা আদায় হয়েছে (নাম ও সনাক্তকরণ)": "N/A",
         "যার পক্ষ হতে টাকা আদায় হয়েছে (নাম ও ঠিকানা)": "N/A",
-        "যে ধারায় আদায় হয়েছে": "ডাটা পাওয়া যায়নি/সার্ভার স্লো"
+        "যে ধারায় আদায় হয়েছে": "ডাটা পাওয়া যায়নি/সঠিক নয়"
     }
 
 if uploaded_file is not None:
     st.success("ফাইল আপলোড সফল হয়েছে!")
     
     challans = []
-    # নিখুঁত চালান নম্বর ম্যাচিং
     pattern = r'\b\d{4}-\d{10,11}\b'
     
     with pdfplumber.open(uploaded_file) as pdf:
@@ -75,8 +98,7 @@ if uploaded_file is not None:
         completed_count = 0
         total_challans = len(challans)
         
-        # থ্রেড সংখ্যা ৫ এ রেখে সার্ভারে চাপ কমানো হলো যাতে ব্লক না করে
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=6) as executor:
             future_to_chl = {executor.submit(fetch_single_challan, chl): chl for chl in challans}
             
             for future in as_completed(future_to_chl):
@@ -89,7 +111,6 @@ if uploaded_file is not None:
         
         status_text.text("সকল চালান ভেরিফিকেশন সম্পন্ন হয়েছে!")
         
-        # ডাটাফ্রেম তৈরি
         df = pd.DataFrame(results)
         excel_file = "Challan_Verification_Report.xlsx"
         df.to_excel(excel_file, index=False)
