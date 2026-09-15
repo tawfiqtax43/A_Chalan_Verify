@@ -23,16 +23,16 @@ headers = {
 }
 
 def fetch_single_challan(chl):
-    # চালান নম্বরকে ২ ভাগে ভাগ করা (যেমন: 2627 এবং বাকি অংশ)
     parts = chl.split('-')
-    if len(parts) == 2:
-        c1, c2 = parts[0], parts[1]
+    if len(parts) >= 2:
+        c1 = parts[0].strip()
+        c2 = "-".join(parts[1:]).strip()
     else:
-        c1, c2 = chl[:4], chl[4:].replace('-', '')
+        c1 = chl[:4]
+        c2 = chl[4:]
 
     url = "https://challanverification.finance.gov.bd/echalan/details.php"
     
-    # ফর্মের ইনপুট ডাটা তৈরি (সরাসরি আপনার মার্ক করা ফর্মের সাবমিশন)
     payload = {
         'c1': c1,
         'c2': c2,
@@ -42,17 +42,15 @@ def fetch_single_challan(chl):
 
     for attempt in range(2):
         try:
-            # POST এবং GET দুটো পদ্ধতিই হ্যান্ডেল করবে
-            response = session.post(url, data=payload, headers=headers, timeout=8)
-            if response.status_code != 200 or len(response.text) < 300:
-                response = session.get(f"{url}?challanNo={chl}&c1={c1}&c2={c2}", headers=headers, timeout=8)
+            response = session.post(url, data=payload, headers=headers, timeout=10)
+            if response.status_code != 200 or len(response.text) < 400:
+                response = session.get(f"{url}?challanNo={chl}&c1={c1}&c2={c2}", headers=headers, timeout=10)
 
             if response.status_code == 200:
                 response.encoding = 'utf-8'
                 soup = BeautifulSoup(response.text, 'html.parser')
                 tds = soup.find_all('td')
                 
-                # ওয়েবসাইট থেকে ডাটা পড়া
                 if len(tds) >= 4:
                     collector = tds[1].get_text(strip=True)
                     payer = tds[2].get_text(strip=True)
@@ -79,7 +77,8 @@ if uploaded_file is not None:
     st.success("ফাইল আপলোড সফল হয়েছে!")
     
     challans = []
-    pattern = r'\b\d{4}-\d{10,11}\b'
+    # CHL: এর পর ১৫ ডিজিটের চালান নম্বর ধরে আনার সঠিক প্যাটার্ন
+    pattern = r'CHL:\s*(\d{4}-\d{11})'
     
     with pdfplumber.open(uploaded_file) as pdf:
         for page in pdf.pages:
@@ -89,8 +88,11 @@ if uploaded_file is not None:
                 if m not in challans:
                     challans.append(m)
                     
-    st.write(f"মোট বৈধ চালান নম্বর পাওয়া গেছে: {len(challans)} টি")
+    st.write(f"মোট ১৫ ডিজিটের চালান নম্বর পাওয়া গেছে: {len(challans)} টি")
     
+    if len(challans) > 0:
+        st.write("নমুনা চালান নম্বর:", challans[:3])
+
     if st.button("স্বয়ংক্রিয় ভেরিফিকেশন শুরু করুন"):
         progress_bar = st.progress(0)
         status_text = st.empty()
