@@ -4,15 +4,45 @@ import re
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-st.title("ই-চালান স্বয়ংক্রিয় ভেরিফিকেশন ও এক্সেল জেনারেটর")
+st.title("এ-চালান ভেরিফিকেশন,কর অঞ্চল-৩(চট্টগ্রাম)")
 
 uploaded_file = st.file_uploader("আপনার PDF ফাইলটি আপলোড করুন", type=["pdf"])
 
+def fetch_single_challan(chl):
+    url = f"https://challanverification.finance.gov.bd/echalan/details.php?challanNo={chl}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        tds = soup.find_all('td')
+        
+        collector = tds[1].get_text(strip=True) if len(tds) > 1 else "N/A"
+        payer = tds[2].get_text(strip=True) if len(tds) > 2 else "N/A"
+        section = tds[4].get_text(strip=True) if len(tds) > 4 else "N/A"
+        
+        return {
+            "চালান নং": chl,
+            "যার মাধ্যমে টাকা আদায় হয়েছে (নাম ও সনাক্তকরণ)": collector,
+            "যার পক্ষ হতে টাকা আদায় হয়েছে (নাম ও ঠিকানা)": payer,
+            "যে ধারায় আদায় হয়েছে": section
+        }
+    except Exception:
+        return {
+            "চালান নং": chl,
+            "যার মাধ্যমে টাকা আদায় হয়েছে (নাম ও সনাক্তকরণ)": "N/A",
+            "যার পক্ষ হতে টাকা আদায় হয়েছে (নাম ও ঠিকানা)": "N/A",
+            "যে ধারায় আদায় হয়েছে": "Error/Timeout"
+        }
+
 if uploaded_file is not None:
-    st.success("ফাইল আপলোড সফল হয়েছে! ডাটা এক্সট্র্যাক্ট করা হচ্ছে...")
+    st.success("ফাইল আপলোড সফল হয়েছে!")
     
-    # PDF থেকে চালান নম্বর সংগ্রহ
     challans = []
     pattern = r'2627-\d{11}'
     
@@ -26,53 +56,32 @@ if uploaded_file is not None:
                     
     st.write(f"মোট চালান নম্বর পাওয়া গেছে: {len(challans)} টি")
     
-    if st.button("যাচাইকরণ শুরু করুন"):
+    if st.button("স্বয়ংক্রিয় ভেরিফিকেশন শুরু করুন"):
         progress_bar = st.progress(0)
+        status_text = st.empty()
         results = []
+        completed_count = 0
+        total_challans = len(challans)
         
-        # Requests Session চালুকরণ
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
+        # একসাথে ১০টি থ্রেডে সমান্তরালভাবে ভেরিফাই হবে
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_chl = {executor.submit(fetch_single_challan, chl): chl for chl in challans}
+            
+            for future in as_completed(future_to_chl):
+                data = future.result()
+                results.append(data)
+                completed_count += 1
+                
+                # প্রোগ্রেস আপডেট
+                progress_bar.progress(completed_count / total_challans)
+                status_text.text(f"প্রসেস হচ্ছে: {completed_count}/{total_challans}")
         
-        for idx, chl in enumerate(challans):
-            url = f"https://challanverification.finance.gov.bd/echalan/details.php?challanNo={chl}"
-            try:
-                response = session.get(url, timeout=15)
-                response.encoding = 'utf-8'
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # চালানের টেবিল থেকে কলামগুলো বের করা
-                tds = soup.find_all('td')
-                
-                # কলাম ডাটা নিরাপদভাবে এক্সট্র্যাক্ট করা
-                collector = tds[1].get_text(strip=True) if len(tds) > 1 else "N/A"
-                payer = tds[2].get_text(strip=True) if len(tds) > 2 else "N/A"
-                section = tds[4].get_text(strip=True) if len(tds) > 4 else "N/A"
-                
-                results.append({
-                    "চালান নং": chl,
-                    "যার মাধ্যমে টাকা আদায় হয়েছে (নাম ও সনাক্তকরণ)": collector,
-                    "যার পক্ষ হতে টাকা আদায় হয়েছে (নাম ও ঠিকানা)": payer,
-                    "যে ধারায় আদায় হয়েছে": section
-                })
-            except Exception as e:
-                results.append({
-                    "চালান নং": chl,
-                    "যার মাধ্যমে টাকা আদায় হয়েছে (নাম ও সনাক্তকরণ)": "N/A",
-                    "যার পক্ষ হতে টাকা আদায় হয়েছে (নাম ও ঠিকানা)": "N/A",
-                    "যে ধারায় আদায় হয়েছে": "Error/Not Found"
-                })
-            
-            progress_bar.progress((idx + 1) / len(challans))
-            
-        # এক্সেল ফাইল প্রস্তুতকরণ
+        status_text.text("সকল চালান ভেরিফিকেশন সম্পন্ন হয়েছে!")
+        
+        # চালানের ক্রমানুসারে সাজানো
         df = pd.DataFrame(results)
         excel_file = "Challan_Verification_Report.xlsx"
         df.to_excel(excel_file, index=False)
-        
-        st.success("সকল চালান ভেরিফিকেশন সম্পন্ন হয়েছে!")
         
         with open(excel_file, "rb") as f:
             st.download_button(
