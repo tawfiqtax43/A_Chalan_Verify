@@ -11,7 +11,7 @@ st.set_page_config(page_title="এ-চালান অটোমেটেড ভ�
 st.title("এ-চালান অটোমেটেড ভেরিফিকেশন")
 st.subheader("কর অঞ্চল-৩ (চট্টগ্রাম)")
 
-# সেসন স্টেট ইনিশিওলাইজেশন (ডাটা ধরে রাখার জন্য)
+# সেসন স্টেট ইনিশিওলাইজেশন
 if "results" not in st.session_state:
     st.session_state.results = []
 if "processed_challans" not in st.session_state:
@@ -37,7 +37,6 @@ if uploaded_file is not None:
     completed_count = len(st.session_state.results)
     remaining_count = max(0, total_count - completed_count)
 
-    # স্ক্রিনশটের মত ৩টি মেট্রিক্স কার্ড
     col1, col2, col3 = st.columns(3)
     col1.metric("মোট চালান পাওয়া গেছে", f"{total_count} টি")
     col2.metric("সম্পন্ন হয়েছে", f"{completed_count} টি")
@@ -53,12 +52,10 @@ if uploaded_file is not None:
         st.session_state.processed_challans = set()
         st.rerun()
 
-    # রিয়েল-টাইম আপডেটের জন্য কন্টেইনার
     progress_container = st.empty()
     status_text = st.empty()
     table_placeholder = st.empty()
 
-    # আগে সংগৃহীত ডাটা টেবিলে দেখানো
     if st.session_state.results:
         table_placeholder.dataframe(pd.DataFrame(st.session_state.results), use_container_width=True)
 
@@ -78,45 +75,69 @@ if uploaded_file is not None:
                 )
                 page = context.new_page()
 
+                # ওয়েবসাইটে প্রথম ঢোকা
+                try:
+                    page.goto("https://challanverification.finance.gov.bd/echalan/", timeout=45000)
+                    page.wait_for_load_state("networkidle")
+                except Exception:
+                    pass
+
                 for idx, clean_chl in enumerate(remaining_challans):
                     current_overall = len(st.session_state.results) + 1
-                    status_text.text(f"প্রসেসিং চলছে: {current_overall}/{total_count}")
+                    status_text.text(f"প্রসেসিং চলছে: {current_overall}/{total_count} (চালান: {clean_chl})")
                     progress_container.progress(current_overall / total_count)
 
-                    parts = clean_chl.split('-')
-                    c1 = parts[0].strip() if len(parts) >= 2 else clean_chl[:4]
-                    c2 = "-".join(parts[1:]).strip() if len(parts) >= 2 else clean_chl[4:]
+                    # ৪ ডিজিট ও ১১ ডিজিট আলাদা করা
+                    chl_clean_str = clean_chl.replace('-', '').strip()
+                    if len(chl_clean_str) >= 15:
+                        c1 = chl_clean_str[:4]
+                        c2 = chl_clean_str[4:15]
+                    else:
+                        parts = clean_chl.split('-')
+                        c1 = parts[0].strip()
+                        c2 = parts[1].strip() if len(parts) > 1 else ""
 
                     row_data = None
                     try:
+                        # পেজ রিলোড বা ফিল্ড ইনপুট
                         page.goto("https://challanverification.finance.gov.bd/echalan/", timeout=30000)
-                        page.wait_for_timeout(1000)
+                        page.wait_for_timeout(1500)
 
                         inputs = page.query_selector_all("input[type='text']")
                         if len(inputs) >= 2:
-                            inputs[0].fill(c1)
-                            inputs[1].fill(c2)
+                            inputs[0].click()
+                            inputs[0].fill("")
+                            inputs[0].type(c1, delay=50)
 
+                            inputs[1].click()
+                            inputs[1].fill("")
+                            inputs[1].type(c2, delay=50)
+
+                            page.wait_for_timeout(500)
+
+                            # ভেরিফাই বাটনে ক্লিক
                             verify_btn = page.query_selector("input[value='Verify']")
                             if verify_btn:
                                 verify_btn.click()
                             else:
-                                page.keyboard.press("Enter")
+                                inputs[1].press("Enter")
 
-                            page.wait_for_timeout(2500)
+                            # ডাটা লোড হওয়ার জন্য অপেক্ষা
+                            page.wait_for_timeout(4000)
 
+                        # ফলাফল সংগ্রহ
                         tds = page.query_selector_all("td")
-                        texts = [td.inner_text().strip() for td in tds[:10]]
+                        texts = [td.inner_text().strip() for td in tds if td.inner_text().strip()]
 
-                        if len(texts) >= 6:
+                        if len(texts) >= 5:
                             row_data = {
                                 "চালান নং": clean_chl,
-                                "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": texts[0],
-                                "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": texts[1],
-                                "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": texts[2],
-                                "চালান নং (ওয়েবসাইট)": texts[3],
-                                "কি বাবদ জমা দেওয়া হলো তার বিবরণ": texts[4],
-                                "জমার পরিমাণ": texts[5]
+                                "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": texts[0] if len(texts) > 0 else "N/A",
+                                "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": texts[1] if len(texts) > 1 else "N/A",
+                                "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": texts[2] if len(texts) > 2 else "N/A",
+                                "চালান নং (ওয়েবসাইট)": texts[3] if len(texts) > 3 else clean_chl,
+                                "কি বাবদ জমা দেওয়া হলো তার বিবরণ": texts[4] if len(texts) > 4 else "N/A",
+                                "জমার পরিমাণ": texts[5] if len(texts) > 5 else "N/A"
                             }
                     except Exception:
                         pass
@@ -132,7 +153,6 @@ if uploaded_file is not None:
                             "জমার পরিমাণ": "N/A"
                         }
 
-                    # ডাটা যোগ ও টেবিল রিয়েল-টাইম আপডেট
                     st.session_state.results.append(row_data)
                     st.session_state.processed_challans.add(clean_chl)
                     table_placeholder.dataframe(pd.DataFrame(st.session_state.results), use_container_width=True)
@@ -144,7 +164,6 @@ if uploaded_file is not None:
             st.success("ভেরিফিকেশন সম্পূর্ণ সফল হয়েছে!")
             st.rerun()
 
-    # ডাউনলোড বাটন
     if st.session_state.results:
         df = pd.DataFrame(st.session_state.results)
         buffer = io.BytesIO()
