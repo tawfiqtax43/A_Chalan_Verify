@@ -4,81 +4,87 @@ import re
 import pandas as pd
 import time
 import io
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
+from playwright.sync_api import sync_playwright
 
 st.set_page_config(page_title="এ-চালান অটোমেটেড ভেরিফিকেশন প্ল্যাটফর্ম", layout="wide")
 
 st.title("এ-চালান অটোমেটেড ভেরিফিকেশন প্ল্যাটফর্ম")
 st.write("পিডিএফ আপলোড করুন, ব্যাকএন্ড ব্রাউজার থেকে তথ্য সংগ্রহ করে এক্সেল প্রস্তুত করে দেবে।")
 
-def create_driver():
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-software-rasterizer")
-    chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    
-    # webdriver-manager স্বয়ংক্রিয়ভাবে ইনস্টল হওয়া ক্রোমের জন্য সঠিক ড্রাইভারে কাজ করবে
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    return driver
+def verify_all_challans(challans):
+    results = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
 
-def verify_single(driver, clean_chl):
-    parts = clean_chl.split('-')
-    c1 = parts[0].strip() if len(parts) >= 2 else clean_chl[:4]
-    c2 = "-".join(parts[1:]).strip() if len(parts) >= 2 else clean_chl[4:]
+    with sync_playwright() as p:
+        # Render-এ চালানোর জন্য হেডলেস ক্রোমিয়াম লঞ্চ
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+        )
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
 
-    try:
-        driver.get("https://challanverification.finance.gov.bd/echalan/")
-        time.sleep(1.5)
+        for idx, clean_chl in enumerate(challans):
+            parts = clean_chl.split('-')
+            c1 = parts[0].strip() if len(parts) >= 2 else clean_chl[:4]
+            c2 = "-".join(parts[1:]).strip() if len(parts) >= 2 else clean_chl[4:]
 
-        inputs = driver.find_elements(By.TAG_NAME, "input")
-        text_inputs = [i for i in inputs if i.get_attribute("type") == "text"]
-
-        if len(text_inputs) >= 2:
-            text_inputs[0].clear()
-            text_inputs[0].send_keys(c1)
-            text_inputs[1].clear()
-            text_inputs[1].send_keys(c2)
-
-            verify_btns = [i for i in inputs if i.get_attribute("value") == "Verify"]
-            if verify_btns:
-                verify_btns[0].click()
+            status_text.text(f"প্রসেসিং চলছে: {idx+1}/{len(challans)} (চালান: {clean_chl})")
             
-            time.sleep(2.5)
+            data_found = False
+            try:
+                page.goto("https://challanverification.finance.gov.bd/echalan/", timeout=30000)
+                page.wait_for_timeout(1000)
 
-            tds = driver.find_elements(By.TAG_NAME, "td")
-            texts = [td.text.strip() for td in tds[:10]]
+                inputs = page.query_selector_all("input[type='text']")
+                if len(inputs) >= 2:
+                    inputs[0].fill(c1)
+                    inputs[1].fill(c2)
 
-            if len(texts) >= 6:
-                return {
+                    verify_btn = page.query_selector("input[value='Verify']")
+                    if verify_btn:
+                        verify_btn.click()
+                    else:
+                        page.keyboard.press("Enter")
+
+                    page.wait_for_timeout(2500)
+
+                tds = page.query_selector_all("td")
+                texts = [td.inner_text().strip() for td in tds[:10]]
+
+                if len(texts) >= 6:
+                    results.append({
+                        "চালান নং": clean_chl,
+                        "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": texts[0],
+                        "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": texts[1],
+                        "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": texts[2],
+                        "চালান নং (ওয়েবসাইট)": texts[3],
+                        "কি বাবদ জমা দেওয়া হলো তার বিবরণ": texts[4],
+                        "জমার পরিমাণ": texts[5]
+                    })
+                    data_found = True
+            except Exception:
+                pass
+
+            if not data_found:
+                results.append({
                     "চালান নং": clean_chl,
-                    "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": texts[0],
-                    "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": texts[1],
-                    "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": texts[2],
-                    "চালান নং (ওয়েবসাইট)": texts[3],
-                    "কি বাবদ জমা দেওয়া হলো তার বিবরণ": texts[4],
-                    "জমার পরিমাণ": texts[5]
-                }
-    except Exception:
-        pass
+                    "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": "N/A",
+                    "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": "N/A",
+                    "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": "N/A",
+                    "চালান নং (ওয়েবসাইট)": clean_chl,
+                    "কি বাবদ জমা দেওয়া হলো তার বিবরণ": "ডাটা পাওয়া যায়নি",
+                    "জমার পরিমাণ": "N/A"
+                })
 
-    return {
-        "চালান নং": clean_chl,
-        "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": "N/A",
-        "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": "N/A",
-        "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": "N/A",
-        "চালান নং (ওয়েবসাইট)": clean_chl,
-        "কি বাবদ জমা দেওয়া হলো তার বিবরণ": "ডাটা পাওয়া যায়নি",
-        "জমার পরিমাণ": "N/A"
-    }
+            progress_bar.progress((idx + 1) / len(challans))
+
+        browser.close()
+
+    return results
 
 uploaded_file = st.file_uploader("আপনার PDF ফাইলটি আপলোড করুন", type=["pdf"])
 
@@ -97,24 +103,8 @@ if uploaded_file is not None:
     st.info(f"মোট {len(challans)} টি চালান পাওয়া গেছে।")
 
     if st.button("▶️ অটোমেটিক ভেরিফিকেশন শুরু করুন"):
-        results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-
         with st.spinner("ব্রাউজার চালুর মাধ্যমে ডাটা ভেরিফাই করা হচ্ছে..."):
-            driver = create_driver()
-
-            try:
-                for idx, chl in enumerate(challans):
-                    data = verify_single(driver, chl)
-                    results.append(data)
-                    
-                    prog = (idx + 1) / len(challans)
-                    progress_bar.progress(prog)
-                    status_text.text(f"প্রসেসিং চলছে: {idx+1}/{len(challans)} (চালান: {chl})")
-
-            finally:
-                driver.quit()
+            results = verify_all_challans(challans)
 
         st.success("ভেরিফিকেশন সম্পন্ন হয়েছে!")
         df = pd.DataFrame(results)
