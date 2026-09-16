@@ -12,9 +12,9 @@ st.set_page_config(page_title="এ-চালান ভেরিফিকেশ�
 st.title("এ-চালান অটোমেটেড ভেরিফিকেশন")
 st.subheader("কর অঞ্চল-৩ (চট্টগ্রাম)")
 
-# সেসন স্টেট ইনিশিয়ালাইজেশন (রিসিউম এবং লাইভ ডেটার জন্য)
+# সেসন স্টেট ইনিশিয়ালাইজেশন
 if 'results' not in st.session_state:
-    st.session_state.results = {}  # {challan_no: dict_data}
+    st.session_state.results = {}
 
 def fetch_single_challan(clean_chl):
     parts = clean_chl.split('-')
@@ -27,7 +27,6 @@ def fetch_single_challan(clean_chl):
         'Referer': 'https://challanverification.finance.gov.bd/echalan/'
     })
 
-    # ১ম চেষ্টা: পপ-আপ সরাসরি ইউআরএল (দ্রুততম)
     url = f"https://challanverification.finance.gov.bd/echalan/details.php?challanNo={clean_chl}"
     try:
         res = session.get(url, timeout=5)
@@ -49,7 +48,6 @@ def fetch_single_challan(clean_chl):
     except Exception:
         pass
 
-    # ২য় চেষ্টা: c1 ও c2 প্যারামিটার
     url2 = f"https://challanverification.finance.gov.bd/echalan/details.php?c1={c1}&c2={c2}"
     try:
         res = session.get(url2, timeout=5)
@@ -122,7 +120,6 @@ if uploaded_file is not None:
         
         completed_count = processed_already
 
-        # সমান্তরাল ১০টি থ্রেড একসাথে দ্রুত কাজ করবে
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_chl = {executor.submit(fetch_single_challan, chl): chl for chl in remaining_challans}
             
@@ -130,23 +127,19 @@ if uploaded_file is not None:
                 chl = future_to_chl[future]
                 data = future.result()
                 
-                # ফলাফল লাইভ মেমরিতে সেভ হচ্ছে
                 st.session_state.results[chl] = data
                 completed_count += 1
                 
-                # অগ্রগতি আপডেট
                 progress = completed_count / total_found
                 progress_bar.progress(progress)
-                status_text.text(f"প্রসেসিং চলছে: {completed_count}/{total_found} (বাকি {total_found - completed_count}টি)")
+                status_text.text(f"প্রসেসিং চলছে: {completed_count}/{total_found}")
                 
-                # প্রতি ৩টি শেষ হলে স্ক্রিনে লাইভ টেবিল আপডেট দেখানো
                 if completed_count % 3 == 0 or completed_count == total_found:
                     df_live = pd.DataFrame(list(st.session_state.results.values()))
                     table_holder.dataframe(df_live.tail(5), use_container_width=True)
 
-        st.success("ভেরিফিকেশন সম্পন্ন হয়েছে/যেটুকু সফল হয়েছে তা নিচে প্রস্তুত!")
+        st.success("ভেরিফিকেশন সম্পন্ন হয়েছে!")
 
-    # যেকোনো মুহূর্তে ডাউনলোড সুবিধা (আংশিক অথবা সম্পূর্ণ)
     if len(st.session_state.results) > 0:
         st.write("---")
         st.subheader("📊 ফলাফল এবং এক্সেল ডাউনলোড")
@@ -164,27 +157,3 @@ if uploaded_file is not None:
             file_name="Challan_Verification_Report.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-```কাজ মাঝখানে থেমে গেলে বা স্লো হলে ফাইল দেখা না যাওয়ার মূল কারণ হলো **Excel সাধারণত ফাইল পুরোপুরি সেভ (Save) না হওয়া পর্যন্ত Disk-এ Output ফাইল লেখে না, অথবা Python script চলাকালীন Memory (RAM)-তেই ডেটা ধরে রাখে।**
-
-Script শেষ হওয়ার আগে যাতে আপনি তৈরি হওয়া **আংশিক ডেটা (Partial Data)** সাথে সাথেই দেখে নিতে পারেন, তার জন্য নিচে **২টি সেরা সমাধান** দেওয়া হলো:
-
----
-
-### সমাধান ১: ডেটা প্রসেস করার পর অটোমেটিক সাথে সাথেই সেভ করা (추천)
-
-স্ক্রিপ্টের কোডে এমন লজিক যোগ করুন যাতে প্রতি **১০টি বা ২০টি SL** প্রসেস হওয়ার পর ফাইলটি **অটো-সেভ (Auto-save)** হতে থাকে। এতে কাজ মাঝখানে আটকে গেলেও আপনি ফাইলের প্রসেস হওয়া অংশটুকু Excel-এ দেখতে পাবেন।
-
-Python (Pandas / Openpyxl) ব্যবহার করলে আপনার মূল `loop`-এর ভেতরে নিচের কোডটি যোগ করতে পারেন:
-
-```python
-# উদাহরণ: প্রতি ১০টি SL প্রসেস হওয়ার পর ফাইল সেভ হবে
-for index, row in enumerate(data_list):
-    # --- আপনার ডেটা আলাদা করার মূল কোড ---
-
-    # প্রতি ১০টা প্রসেস শেষ হলে ফাইল অটো সেভ হবে
-    if (index + 1) % 10 == 0:
-        df_output.to_excel("separated_tax_data.xlsx", index=False)
-        print(f"{index + 1} টি SL প্রসেস সম্পন্ন এবং ফাইল সেভ করা হয়েছে।")
-
-# সব কাজ শেষ হলে চূড়ান্ত সেভ
-df_output.to_excel("separated_tax_data.xlsx", index=False)
