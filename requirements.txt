@@ -1,5 +1,6 @@
 streamlit
 pandas
 pdfplumber
-playwright
+requests
+beautifulsoup4
 openpyxl
