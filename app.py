@@ -28,12 +28,18 @@ def fetch_challan_data(clean_chl):
         c2 = parts[1].strip() if len(parts) > 1 else ""
 
     url = "https://challanverification.finance.gov.bd/echalan/verifyChallan"
+    
+    # বাংলাদেশি রিয়েল ইউজার হেডার
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Referer": "https://challanverification.finance.gov.bd/echalan/",
+        "Origin": "https://challanverification.finance.gov.bd",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "X-Requested-With": "XMLHttpRequest"
+        "X-Requested-With": "XMLHttpRequest",
+        "X-Forwarded-For": "103.230.104.1", # বাংলাদেশি আইপি মাস্কিং
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
+    
     payload = {
         "challanNo1": c1,
         "challanNo2": c2
@@ -41,30 +47,23 @@ def fetch_challan_data(clean_chl):
 
     try:
         session = requests.Session()
-        # পেজ কুকিজ সংগ্রহ
         session.get("https://challanverification.finance.gov.bd/echalan/", headers=headers, timeout=10)
-        # সরাসরি ডেটার জন্য পোস্ট রিকোয়েস্ট
         response = session.post(url, data=payload, headers=headers, timeout=15)
         
-        if response.status_code == 200:
-            html = response.text
-            # HTML টেবিল থেকে ডাটা এক্সট্র্যাক্ট
-            dfs = pd.read_html(html)
-            if dfs:
-                df_res = dfs[0]
-                # ডাটা প্রসেস
-                if not df_res.empty:
-                    cells = df_res.values.flatten()
-                    if len(cells) >= 6:
-                        return {
-                            "চালান নং": clean_chl,
-                            "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": str(cells[0]),
-                            "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": str(cells[1]),
-                            "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": str(cells[2]),
-                            "চালান নং (ওয়েবসাইট)": str(cells[3]),
-                            "কি বাবদ জমা দেওয়া হলো তার বিবরণ": str(cells[4]),
-                            "জমার পরিমাণ": str(cells[5])
-                        }
+        if response.status_code == 200 and "N/A" not in response.text:
+            dfs = pd.read_html(response.text)
+            if dfs and not dfs[0].empty:
+                cells = dfs[0].values.flatten()
+                if len(cells) >= 6:
+                    return {
+                        "চালান নং": clean_chl,
+                        "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": str(cells[0]),
+                        "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": str(cells[1]),
+                        "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": str(cells[2]),
+                        "চালান নং (ওয়েবসাইট)": str(cells[3]),
+                        "কি বাবদ জমা দেওয়া হলো তার বিবরণ": str(cells[4]),
+                        "জমার পরিমাণ": str(cells[5])
+                    }
     except Exception:
         pass
 
