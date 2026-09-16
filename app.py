@@ -8,7 +8,6 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
 
 st.set_page_config(page_title="এ-চালান অটোমেটেড ভেরিফিকেশন প্ল্যাটফর্ম", layout="wide")
 
@@ -17,15 +16,18 @@ st.write("পিডিএফ আপলোড করুন, ব্যাকএন
 
 def create_driver():
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--remote-debugging-port=9222")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # Chromium লোকেশন সেট করা
     chrome_options.binary_location = "/usr/bin/chromium"
-    
     service = Service("/usr/bin/chromedriver")
+    
     driver = webdriver.Chrome(service=service, options=chrome_options)
     return driver
 
@@ -53,7 +55,6 @@ def verify_single(driver, clean_chl):
             
             time.sleep(2.5)
 
-            # পপ-আপ বা মূল পেজের টেবিল খোঁজা
             tds = driver.find_elements(By.TAG_NAME, "td")
             texts = [td.text.strip() for td in tds[:10]]
 
