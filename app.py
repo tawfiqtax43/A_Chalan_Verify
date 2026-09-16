@@ -2,13 +2,104 @@ import streamlit as st
 import pdfplumber
 import re
 import pandas as pd
-import json
-import streamlit.components.v1 as components
+import io
+import time
+import asyncio
+from playwright.async_api import async_playwright
 
 st.set_page_config(page_title="এ-চালান অটোমেটেড ভেরিফিকেশন", layout="wide")
 
 st.title("এ-চালান অটোমেটেড ভেরিফিকেশন")
 st.subheader("কর অঞ্চল-৩ (চট্টগ্রাম)")
+
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "processed_challans" not in st.session_state:
+    st.session_state.processed_challans = set()
+
+async def fetch_with_playwright(c1, c2):
+    """Playwright দিয়ে সত্যিকারের ব্রাউজারের মতো ওয়েবসাইট ওপেন করে ডাটা এক্সট্র্যাক্ট করে"""
+    async with async_playwright() as p:
+        # Launch headless Chromium browser
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        )
+        page = await context.new_page()
+
+        try:
+            # চালানের মূল পেজে প্রবেশ
+            await page.goto("https://challanverification.finance.gov.bd/echalan/", timeout=30000, wait_until="networkidle")
+            
+            # প্রথম ঘর ও দ্বিতীয় ঘরে মান ইনপুট দেওয়া
+            await page.fill("#challanNo1", c1)
+            await page.fill("#challanNo2", c2)
+
+            # সাবমিট/ভেরিফাই বাটনে ক্লিক করা (বা ফর্ম সাবমিট করা)
+            # এ-চালানের সাবমিট বাটন অথবা ফর্ম প্রেস
+            submit_btn = await page.query_selector("button[type='submit'], input[type='submit'], .btn-primary")
+            if submit_btn:
+                await submit_btn.click()
+            else:
+                await page.keyboard.press("Enter")
+
+            # রেজাল্ট লোড হওয়া পর্যন্ত ২ সেকেন্ড অপেক্ষা
+            await page.wait_for_timeout(2500)
+
+            # পেজের টেবিল ডাটা বের করা
+            cells = await page.query_selector_all("table tr td")
+            texts = []
+            for cell in cells:
+                txt = await cell.inner_text()
+                if txt.strip():
+                    texts.append(txt.strip())
+
+            await browser.close()
+
+            if len(texts) >= 6 and "ডাটা পাওয়া যায়নি" not in texts[0]:
+                return {
+                    "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": texts[0],
+                    "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": texts[1],
+                    "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": texts[2],
+                    "চালান নং (ওয়েবসাইট)": texts[3],
+                    "কি বাবদ জমা দেওয়া হলো তার বিবরণ": texts[4],
+                    "জমার পরিমাণ": texts[5]
+                }
+        except Exception as e:
+            await browser.close()
+            
+    return None
+
+def verify_single_challan(clean_chl):
+    chl_clean_str = re.sub(r'\D', '', clean_chl)
+    if len(chl_clean_str) >= 15:
+        c1 = chl_clean_str[:4]
+        c2 = chl_clean_str[4:15]
+    else:
+        parts = clean_chl.split('-')
+        c1 = parts[0].strip()
+        c2 = parts[1].strip() if len(parts) > 1 else ""
+
+    try:
+        data = asyncio.run(fetch_with_playwright(c1, c2))
+        if data:
+            data["চালান নং"] = clean_chl
+            return data
+    except Exception:
+        pass
+
+    return {
+        "চালান নং": clean_chl,
+        "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": "ডাটা পাওয়া যায়নি/সঠিক নয়",
+        "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": "N/A",
+        "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": "N/A",
+        "চালান নং (ওয়েবসাইট)": clean_chl,
+        "কি বাবদ জমা দেওয়া হলো তার বিবরণ": "N/A",
+        "জমার পরিমাণ": "N/A"
+    }
 
 uploaded_file = st.file_uploader("আপনার PDF ফাইলটি আপলোড করুন", type=["pdf"])
 
@@ -26,155 +117,63 @@ if uploaded_file is not None:
                 if m not in challans:
                     challans.append(m)
 
-    st.write(f"**মোট চালান পাওয়া গেছে:** {len(challans)} টি")
+    total_count = len(challans)
+    completed_count = len(st.session_state.results)
+    remaining_count = max(0, total_count - completed_count)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("মোট চালান পাওয়া গেছে", f"{total_count} টি")
+    col2.metric("সম্পন্ন হয়েছে", f"{completed_count} টি")
+    col3.metric("বাকি আছে", f"{remaining_count} টি")
+
+    btn_col1, btn_col2 = st.columns([2, 2])
     
-    challans_json = json.dumps(challans)
+    start_btn = btn_col1.button("▶️ অটোমেটেড ভেরিফিকেশন শুরু করুন")
+    reset_btn = btn_col2.button("🔄 সমস্ত ডাটা রিসেট করুন")
 
-    html_code = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <style>
-        body {{ font-family: sans-serif; padding: 10px; }}
-        button {{
-            background-color: #ff4b4b; color: white; border: none; padding: 10px 20px;
-            font-size: 16px; border-radius: 5px; cursor: pointer; margin-bottom: 15px;
-        }}
-        button:hover {{ background-color: #d33333; }}
-        #progress {{ font-weight: bold; margin-bottom: 10px; color: #1f77b4; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }}
-        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-        th {{ background-color: #f2f2f2; }}
-        tr:nth-child(even){{ background-color: #f9f9f9; }}
-    </style>
-    </head>
-    <body>
+    if reset_btn:
+        st.session_state.results = []
+        st.session_state.processed_challans = set()
+        st.rerun()
 
-    <button onclick="startVerification()">▶️ ভেরিফিকেশন শুরু করুন (ব্রাউজার মোড)</button>
-    <div id="progress">প্রসেসিং শুরুর জন্য প্রস্তুত...</div>
-    
-    <div style="overflow-x:auto;">
-        <table id="resultTable">
-            <thead>
-                <tr>
-                    <th>#</th>
-                    <th>চালান নং</th>
-                    <th>যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে</th>
-                    <th>যার মাধ্যমে টাকা আদায় হলো</th>
-                    <th>যার পক্ষ হতে টাকা প্রদান হলো</th>
-                    <th>চালান নং (ওয়েবসাইট)</th>
-                    <th>কি বাবদ জমা দেওয়া হলো</th>
-                    <th>জমার পরিমাণ</th>
-                </tr>
-            </thead>
-            <tbody>
-            </tbody>
-        </table>
-    </div>
+    progress_container = st.empty()
+    status_text = st.empty()
+    table_placeholder = st.empty()
 
-    <script>
-    const challanList = {challans_json};
+    if st.session_state.results:
+        table_placeholder.dataframe(pd.DataFrame(st.session_state.results), use_container_width=True)
 
-    async function verifyChallan(clean_chl) {{
-        let chl_clean_str = clean_chl.replace(/\\D/g, '');
-        let c1 = "", c2 = "";
-        if (chl_clean_str.length >= 15) {{
-            c1 = chl_clean_str.substring(0, 4);
-            c2 = chl_clean_str.substring(4, 15);
-        }} else {{
-            let parts = clean_chl.split('-');
-            c1 = parts[0].trim();
-            c2 = parts[1] ? parts[1].trim() : "";
-        }}
+    if start_btn:
+        remaining_challans = [c for c in challans if c not in st.session_state.processed_challans]
 
-        let formData = new URLSearchParams();
-        formData.append('challanNo1', c1);
-        formData.append('challanNo2', c2);
+        if not remaining_challans:
+            st.info("সবগুলো চালানের ভেরিফিকেশন ইতিমধ্যেই শেষ হয়েছে!")
+        else:
+            for idx, clean_chl in enumerate(remaining_challans):
+                current_overall = len(st.session_state.results) + 1
+                status_text.text(f"ব্রাউজারে ভেরিফাই চলছে: {current_overall}/{total_count} (চালান: {clean_chl})")
+                progress_container.progress(current_overall / total_count)
 
-        try {{
-            let response = await fetch('https://challanverification.finance.gov.bd/echalan/verifyChallan', {{
-                method: 'POST',
-                headers: {{
-                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                    'X-Requested-With': 'XMLHttpRequest'
-                }},
-                body: formData.toString()
-            }});
+                row_data = verify_single_challan(clean_chl)
 
-            if (response.ok) {{
-                let text = await response.text();
-                let parser = new DOMParser();
-                let doc = parser.parseFromString(text, 'text/html');
-                let table = doc.querySelector('table');
-                
-                if (table) {{
-                    let rows = table.querySelectorAll('tr');
-                    let cellsData = [];
-                    rows.forEach(r => {{
-                        r.querySelectorAll('td').forEach(c => cellsData.push(c.innerText.trim()));
-                    }});
-                    
-                    if (cellsData.length >= 6 && !cellsData[0].includes("ডাটা পাওয়া যায়নি")) {{
-                        return {{
-                            chl: clean_chl,
-                            org: cellsData[0],
-                            via: cellsData[1],
-                            by: cellsData[2],
-                            web_chl: cellsData[3],
-                            desc: cellsData[4],
-                            amount: cellsData[5]
-                        }};
-                    }}
-                }}
-            }}
-        }} catch (e) {{
-            console.error(e);
-        }}
+                st.session_state.results.append(row_data)
+                st.session_state.processed_challans.add(clean_chl)
+                table_placeholder.dataframe(pd.DataFrame(st.session_state.results), use_container_width=True)
 
-        return {{
-            chl: clean_chl,
-            org: "ডাটা পাওয়া যায়নি/সঠিক নয়",
-            via: "N/A",
-            by: "N/A",
-            web_chl: clean_chl,
-            desc: "N/A",
-            amount: "N/A"
-        }};
-    }}
+            status_text.text(f"প্রসেসিং সম্পন্ন: {total_count}/{total_count}")
+            progress_container.progress(1.0)
+            st.success("ভেরিফিকেশন সম্পূর্ণ সফল হয়েছে!")
+            st.rerun()
 
-    async function startVerification() {{
-        let tbody = document.querySelector("#resultTable tbody");
-        tbody.innerHTML = "";
-        let progressDiv = document.getElementById("progress");
-        
-        for (let i = 0; i < challanList.length; i++) {{
-            let chl = challanList[i];
-            progressDiv.innerText = `প্রসেসিং চলছে: ${{i + 1}} / ${{challanList.length}} (চালান: ${{chl}})`;
-            
-            let res = await verifyChallan(chl);
-            
-            let tr = document.createElement("tr");
-            tr.innerHTML = `
-                <td>${{i + 1}}</td>
-                <td>${{res.chl}}</td>
-                <td>${{res.org}}</td>
-                <td>${{res.via}}</td>
-                <td>${{res.by}}</td>
-                <td>${{res.web_chl}}</td>
-                <td>${{res.desc}}</td>
-                <td>${{res.amount}}</td>
-            `;
-            tbody.appendChild(tr);
-            
-            // 200ms delay to prevent server overload
-            await new Promise(r => setTimeout(r, 200));
-        }}
-        
-        progressDiv.innerText = `প্রসেসিং সম্পন্ন: ${{challanList.length}} / ${{challanList.length}} টি চালান সাকসেসফুলি ভেরিফাইড!`;
-    }}
-    </script>
-    </body>
-    </html>
-    """
+    if st.session_state.results:
+        df = pd.DataFrame(st.session_state.results)
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Report')
 
-    components.html(html_code, height=600, scrolling=True)
+        st.download_button(
+            label="📥 এক্সেল ফাইল ডাউনলোড করুন",
+            data=buffer.getvalue(),
+            file_name="Challan_Report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
