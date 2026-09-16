@@ -2,72 +2,93 @@ import streamlit as st
 import pdfplumber
 import re
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
+from playwright.async_api import async_playwright
 
 st.title("এ-চালান অটোমেটেড ভেরিফিকেশন")
 st.subheader("কর অঞ্চল-৩ (চট্টগ্রাম)")
 
 uploaded_file = st.file_uploader("আপনার PDF ফাইলটি আপলোড করুন", type=["pdf"])
 
-session = requests.Session()
-headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    'Referer': 'https://challanverification.finance.gov.bd/echalan/'
-}
-
-def fetch_single_challan(chl):
-    clean_chl = chl.strip()
-    
-    # ৩ নম্বর স্লাইডে দেখানো পপ-আপ উইন্ডোর সরাসরি লিংক URL
-    url = f"https://challanverification.finance.gov.bd/echalan/details.php?challanNo={clean_chl}"
+async def verify_challan_with_browser(clean_chl, page):
+    parts = clean_chl.split('-')
+    c1 = parts[0].strip() if len(parts) >= 2 else clean_chl[:4]
+    c2 = "-".join(parts[1:]).strip() if len(parts) >= 2 else clean_chl[4:]
 
     try:
-        response = session.get(url, headers=headers, timeout=12)
-        if response.status_code == 200 and len(response.text) > 300:
-            response.encoding = 'utf-8'
-            soup = BeautifulSoup(response.text, 'html.parser')
+        # চালান ভেরিফিকেশন পেইজে যাওয়া (স্লাইড ২)
+        await page.goto("https://challanverification.finance.gov.bd/echalan/", timeout=30000)
+        
+        # ইনপুট ফিল্ড ২টি পূরণ করা (স্লাইড ৩)
+        inputs = await page.query_selector_all("input[type='text']")
+        if len(inputs) >= 2:
+            await inputs[0].fill(c1)
+            await inputs[1].fill(c2)
             
-            tds = soup.find_all('td')
+            # Verify বাটনে ক্লিক
+            verify_btn = await page.query_selector("input[value='Verify']")
+            if verify_btn:
+                # পপ-আপ বা একই উইন্ডোতে লোড হওয়া নিশ্চিত করা
+                async with page.expect_navigation(timeout=10000):
+                    await verify_btn.click()
+            else:
+                await page.keyboard.press("Enter")
             
-            # ৪ নম্বর স্লাইড অনুযায়ী কলাম ১ থেকে ৬ এর ডাটা নেওয়া
-            if len(tds) >= 6:
-                col1 = tds[0].get_text(strip=True) # ১নং কলাম: সরকারি প্রতিষ্ঠান
-                col2 = tds[1].get_text(strip=True) # ২নং কলাম: যার মাধ্যমে টাকা আদায় হয়েছে
-                col3 = tds[2].get_text(strip=True) # ৩নং কলাম: যার পক্ষ হতে টাকা আদায় হয়েছে
-                col4 = tds[3].get_text(strip=True) # ৪নং কলাম: চালান নং
-                col5 = tds[4].get_text(strip=True) # ৫নং কলাম: বিবরণ/ধারা
-                col6 = tds[5].get_text(strip=True) # ৬নং কলাম: জমা পরিমাণ
+            await page.wait_for_timeout(2000)
 
-                return {
-                    "চালান নং": clean_chl,
-                    "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": col1 if col1 else "N/A",
-                    "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": col2 if col2 else "N/A",
-                    "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": col3 if col3 else "N/A",
-                    "চালান নং (ওয়েবসাইট)": col4 if col4 else clean_chl,
-                    "কি বাবদ জমা দেওয়া হলো তার বিবরণ": col5 if col5 else "N/A",
-                    "জমার পরিমাণ": col6 if col6 else "N/A"
-                }
+        # পপ-আপ বা নতুন টেবিলে ৬টি কলামের ডাটা নেওয়া (স্লাইড ৪)
+        tds = await page.query_selector_all("td")
+        texts = []
+        for td in tds[:10]:
+            t = await td.inner_text()
+            texts.append(t.strip())
+
+        if len(texts) >= 6:
+            return {
+                "চালান নং": clean_chl,
+                "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": texts[0] if texts[0] else "N/A",
+                "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": texts[1] if texts[1] else "N/A",
+                "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": texts[2] if texts[2] else "N/A",
+                "চালান নং (ওয়েবসাইট)": texts[3] if texts[3] else clean_chl,
+                "কি বাবদ জমা দেওয়া হলো তার বিবরণ": texts[4] if texts[4] else "N/A",
+                "জমার পরিমাণ": texts[5] if texts[5] else "N/A"
+            }
     except Exception:
         pass
-            
+
     return {
         "চালান নং": clean_chl,
         "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": "N/A",
         "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": "N/A",
         "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": "N/A",
-        "চালান নং (ওয়েবসাইট)": clean_chl,
-        "কি বাবদ জমা দেওয়া হলো তার বিবরণ": "ডাটা পাওয়া যায়নি/সঠিক নয়",
+        "চালান নং (ওয়েবসাইট)": clean_chl,
+        "কি বাবদ জমা দেওয়া হলো তার বিবরণ": "ডাটা পাওয়া যায়নি/সঠিক নয়",
         "জমার পরিমাণ": "N/A"
     }
+
+async def process_all_challans(challan_list):
+    results = []
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for idx, chl in enumerate(challan_list):
+            data = await verify_challan_with_browser(chl, page)
+            results.append(data)
+            progress_bar.progress((idx + 1) / len(challan_list))
+            status_text.text(f"প্রসেস হচ্ছে: {idx + 1}/{len(challan_list)}")
+            
+        await browser.close()
+    return results
 
 if uploaded_file is not None:
     st.success("ফাইল আপলোড সফল হয়েছে!")
     
     challans = []
-    # ১ম স্লাইডের CHL: এর পরের ১৫ ডিজিটের নম্বর ধরার প্যাটার্ন
     pattern = r'CHL:\s*(\d{4}-\d{11})'
     
     with pdfplumber.open(uploaded_file) as pdf:
@@ -84,24 +105,9 @@ if uploaded_file is not None:
         st.write("নমুনা চালান নম্বর:", challans[:3])
 
     if st.button("স্বয়ংক্রিয় ভেরিফিকেশন শুরু করুন"):
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        results = []
-        completed_count = 0
-        total_challans = len(challans)
+        results = asyncio.run(process_all_challans(challans))
         
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_chl = {executor.submit(fetch_single_challan, chl): chl for chl in challans}
-            
-            for future in as_completed(future_to_chl):
-                data = future.result()
-                results.append(data)
-                completed_count += 1
-                
-                progress_bar.progress(completed_count / total_challans)
-                status_text.text(f"প্রসেস হচ্ছে: {completed_count}/{total_challans}")
-        
-        status_text.text("সকল চালান ভেরিফিকেশন সম্পন্ন হয়েছে!")
+        st.success("সকল চালান ভেরিফিকেশন সম্পন্ন হয়েছে!")
         
         df = pd.DataFrame(results)
         excel_file = "Challan_Verification_Report.xlsx"
