@@ -3,7 +3,19 @@ import pdfplumber
 import re
 import pandas as pd
 import asyncio
+import os
+import subprocess
 from playwright.async_api import async_playwright
+
+# Playwright Chromium ব্রাউজার সার্ভারে ইন্সটল নিশ্চিত করা
+@st.cache_resource
+def install_playwright_browsers():
+    try:
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+    except Exception as e:
+        st.error(f"Playwright installation failed: {e}")
+
+install_playwright_browsers()
 
 st.title("এ-চালান অটোমেটেড ভেরিফিকেশন")
 st.subheader("কর অঞ্চল-৩ (চট্টগ্রাম)")
@@ -16,19 +28,15 @@ async def verify_challan_with_browser(clean_chl, page):
     c2 = "-".join(parts[1:]).strip() if len(parts) >= 2 else clean_chl[4:]
 
     try:
-        # চালান ভেরিফিকেশন পেইজে যাওয়া (স্লাইড ২)
         await page.goto("https://challanverification.finance.gov.bd/echalan/", timeout=30000)
         
-        # ইনপুট ফিল্ড ২টি পূরণ করা (স্লাইড ৩)
         inputs = await page.query_selector_all("input[type='text']")
         if len(inputs) >= 2:
             await inputs[0].fill(c1)
             await inputs[1].fill(c2)
             
-            # Verify বাটনে ক্লিক
             verify_btn = await page.query_selector("input[value='Verify']")
             if verify_btn:
-                # পপ-আপ বা একই উইন্ডোতে লোড হওয়া নিশ্চিত করা
                 async with page.expect_navigation(timeout=10000):
                     await verify_btn.click()
             else:
@@ -36,7 +44,6 @@ async def verify_challan_with_browser(clean_chl, page):
             
             await page.wait_for_timeout(2000)
 
-        # পপ-আপ বা নতুন টেবিলে ৬টি কলামের ডাটা নেওয়া (স্লাইড ৪)
         tds = await page.query_selector_all("td")
         texts = []
         for td in tds[:10]:
@@ -69,7 +76,10 @@ async def verify_challan_with_browser(clean_chl, page):
 async def process_all_challans(challan_list):
     results = []
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
         context = await browser.new_context()
         page = await context.new_page()
 
