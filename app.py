@@ -30,7 +30,6 @@ if uploaded_file is not None:
 
     st.info(f"মোট {total_count} টি চালান পাওয়া গেছে। নিচের বোতামে ক্লিক করে ভেরিফিকেশন শুরু করুন।")
 
-    # JavaScript Engine to fetch directly from user's browser (Bypasses Geo-block)
     js_code = f"""
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <div id="status" style="font-weight:bold; font-size: 16px; margin-bottom: 10px; color: #0d6efd;"></div>
@@ -85,15 +84,17 @@ if uploaded_file is not None:
             }};
 
             try {{
+                const targetUrl = 'https://challanverification.finance.gov.bd/echalan/verifyChallan';
+                const proxyUrl = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(targetUrl);
+                
                 const formData = new URLSearchParams();
                 formData.append('challanNo1', c1);
                 formData.append('challanNo2', c2);
 
-                const response = await fetch('https://challanverification.finance.gov.bd/echalan/verifyChallan', {{
+                const response = await fetch(proxyUrl, {{
                     method: 'POST',
                     headers: {{
-                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                        'X-Requested-With': 'XMLHttpRequest'
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
                     }},
                     body: formData
                 }});
@@ -109,43 +110,91 @@ if uploaded_file is not None:
                             "চালান নং": cleanChl,
                             "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": tds[0] || "N/A",
                             "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": tds[1] || "N/A",
-                            "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": tds[2] || "N/A",
-                            "চালান নং (ওয়েবসাইট)": tds[3] || cleanChl,
-                            "কি বাবদ জমা দেওয়া হলো তার বিবরণ": tds[4] || "N/A",
-                            "জমার পরিমাণ": tds[5] || "N/A"
-                        }};
-                    }}
-                }}
-            }} catch (e) {{
-                console.error(e);
-            }}
+                            "সমস্যাটি মূলত **CORS (Cross-Origin Resource Sharing)** সিকিউরিটির জন্য হচ্ছে। ব্রাউজার থেকে সরাসরি সরকারি ওয়েবসাইটে রিকোয়েস্ট পাঠালে ব্রাউজার নিজেই তা ব্লক করে দেয় (যে কারণে সকল ঘরে N/A দেখাচ্ছে)। 
 
-            results.push(rowData);
+যেহেতু আপনি চান **কোনো প্রকার সমস্যা ছাড়া টিমের সকলেই যেন পাবলিক লিংক ব্যবহার করে ভেরিফাই করতে পারে**, তাই এর জন্য ক্লাউড সার্ভারেই একটি ছোট **Proxy Tunnel** বানিয়ে দেওয়া হয়েছে। এটি সরাসরি Render সার্ভার থেকে বাংলাদেশ সরকারের আসল ডোমেইনে সঠিক সেশন ও হেডার পাঠাবে।
 
-            const tr = document.createElement('tr');
-            tr.innerHTML = `
-                <td style="padding: 8px;">${{rowData['চালান নং']}}</td>
-                <td style="padding: 8px;">${{rowData['যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে']}}</td>
-                <td style="padding: 8px;">${{rowData['যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)']}}</td>
-                <td style="padding: 8px;">${{rowData['যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)']}}</td>
-                <td style="padding: 8px;">${{rowData['চালান নং (ওয়েবসাইট)']}}</td>
-                <td style="padding: 8px;">${{rowData['কি বাবদ জমা দেওয়া হলো তার বিবরণ']}}</td>
-                <td style="padding: 8px;">${{rowData['জমার পরিমাণ']}}</td>
-            `;
-            tbody.appendChild(tr);
-        }}
+নিচে আপডেট করা **`app.py`** কোডটি দেওয়া হলো। পুরো কোডটি রিপ্লেস করে Render-এ ডিপ্লয় করুন:
 
-        document.getElementById('status').innerText = `ভেরিফিকেশন সম্পূর্ণ সফল হয়েছে! (মোট: ${{challans.length}} টি)`;
-        document.getElementById('start-btn').style.display = 'none';
-        document.getElementById('download-btn').style.display = 'inline-block';
-    }});
+```python
+import streamlit as st
+import pdfplumber
+import re
+import pandas as pd
+import requests
+import io
+import time
 
-    document.getElementById('download-btn').addEventListener('click', () => {{
-        const worksheet = XLSX.utils.json_to_sheet(results);
-        const workbook = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(workbook, worksheet, "Report");
-        XLSX.writeFile(workbook, "Challan_Report.xlsx");
-    }});
-    </script>
-    """
-    components.html(js_code, height=600, scrolling=True)
+st.set_page_config(page_title="এ-চালান অটোমেটেড ভেরিফিকেশন", layout="wide")
+
+st.title("এ-চালান অটোমেটেড ভেরিফিকেশন")
+st.subheader("কর অঞ্চল-৩ (চট্টগ্রাম)")
+
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "processed_challans" not in st.session_state:
+    st.session_state.processed_challans = set()
+
+def fetch_challan_data(clean_chl):
+    chl_clean_str = re.sub(r'\D', '', clean_chl)
+    if len(chl_clean_str) >= 15:
+        c1 = chl_clean_str[:4]
+        c2 = chl_clean_str[4:15]
+    else:
+        parts = clean_chl.split('-')
+        c1 = parts[0].strip()
+        c2 = parts[1].strip() if len(parts) > 1 else ""
+
+    url = "[https://challanverification.finance.gov.bd/echalan/verifyChallan](https://challanverification.finance.gov.bd/echalan/verifyChallan)"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "[https://challanverification.finance.gov.bd/echalan/](https://challanverification.finance.gov.bd/echalan/)",
+        "Origin": "[https://challanverification.finance.gov.bd](https://challanverification.finance.gov.bd)",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "*/*"
+    }
+    
+    payload = {
+        "challanNo1": c1,
+        "challanNo2": c2
+    }
+
+    try:
+        session = requests.Session()
+        # ১. প্রথমে হোম পেজে হিট করে কুকি/সেশন নেওয়া
+        session.get("[https://challanverification.finance.gov.bd/echalan/](https://challanverification.finance.gov.bd/echalan/)", headers=headers, timeout=10)
+        
+        # ২. পোস্ট রিকোয়েস্ট পাঠানো
+        response = session.post(url, data=payload, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            html = response.text
+            # যদি ডেটা টেবিলে থাকে
+            dfs = pd.read_html(io.StringIO(html))
+            if dfs:
+                df_res = dfs[0]
+                if not df_res.empty:
+                    cells = df_res.values.flatten()
+                    # যদি ডেটা সঠিকভাবে পাওয়া যায়
+                    if len(cells) >= 6 and "ডাটা পাওয়া যায়নি" not in str(cells[0]):
+                        return {
+                            "চালান নং": clean_chl,
+                            "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": str(cells[0]),
+                            "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": str(cells[1]),
+                            "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": str(cells[2]),
+                            "চালান নং (ওয়েবসাইট)": str(cells[3]),
+                            "কি বাবদ জমা দেওয়া হলো তার বিবরণ": str(cells[4]),
+                            "জমার পরিমাণ": str(cells[5])
+                        }
+    except Exception as e:
+        pass
+
+    return {
+        "চালান নং": clean_chl,
+        "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": "ডাটা পাওয়া যায়নি/সঠিক নয়",
+        "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": "N/A",
+        "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": "N/A",
+        "চালান নং (ওয়েবসাইট)": clean_chl,
+        "কি বাবদ জমা দেওয়া হলো
