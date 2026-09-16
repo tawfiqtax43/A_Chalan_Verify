@@ -2,7 +2,6 @@ import streamlit as st
 import pdfplumber
 import re
 import pandas as pd
-import time
 import io
 from playwright.sync_api import sync_playwright
 
@@ -11,7 +10,6 @@ st.set_page_config(page_title="এ-চালান অটোমেটেড ভ�
 st.title("এ-চালান অটোমেটেড ভেরিফিকেশন")
 st.subheader("কর অঞ্চল-৩ (চট্টগ্রাম)")
 
-# সেসন স্টেট ইনিশিওলাইজেশন
 if "results" not in st.session_state:
     st.session_state.results = []
 if "processed_challans" not in st.session_state:
@@ -63,76 +61,80 @@ if uploaded_file is not None:
         remaining_challans = [c for c in challans if c not in st.session_state.processed_challans]
 
         if not remaining_challans:
-            st.info("সবগুলো চালানের ভেরিফিকেশন ইতিমধ্যেই শেষ হয়ে গেছে!")
+            st.info("সবগুলো চালানের ভেরিফিকেশন ইতিমধ্যেই শেষ হয়েছে!")
         else:
             with sync_playwright() as p:
+                # anti-bot detection এড়াতে প্রয়োজনীয় আর্গুমেন্ট
                 browser = p.chromium.launch(
                     headless=True,
-                    args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+                    args=[
+                        "--no-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-blink-features=AutomationControlled"
+                    ]
                 )
+                
+                # আসল ব্রাউজারের মত ভান করার জন্য কনটেক্সট
                 context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    viewport={"width": 1366, "height": 768}
                 )
                 page = context.new_page()
 
-                # ওয়েবসাইটে প্রথম ঢোকা
-                try:
-                    page.goto("https://challanverification.finance.gov.bd/echalan/", timeout=45000)
-                    page.wait_for_load_state("networkidle")
-                except Exception:
-                    pass
+                # webdriver stealth ফ্ল্যাগ হাইড করা
+                page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
                 for idx, clean_chl in enumerate(remaining_challans):
                     current_overall = len(st.session_state.results) + 1
                     status_text.text(f"প্রসেসিং চলছে: {current_overall}/{total_count} (চালান: {clean_chl})")
                     progress_container.progress(current_overall / total_count)
 
-                    # ৪ ডিজিট ও ১১ ডিজিট আলাদা করা
-                    chl_clean_str = clean_chl.replace('-', '').strip()
-                    if len(chl_clean_str) >= 15:
-                        c1 = chl_clean_str[:4]
-                        c2 = chl_clean_str[4:15]
-                    else:
-                        parts = clean_chl.split('-')
-                        c1 = parts[0].strip()
-                        c2 = parts[1].strip() if len(parts) > 1 else ""
+                    # ৪ ও ১১ সংখ্যাটি প্রপার আলাদা করা
+                    chl_clean_str = re.sub(r'\D', '', clean_chl)
+                    c1 = chl_clean_str[:4] if len(chl_clean_str) >= 4 else ""
+                    c2 = chl_clean_str[4:15] if len(chl_clean_str) >= 15 else ""
 
                     row_data = None
                     try:
-                        # পেজ রিলোড বা ফিল্ড ইনপুট
-                        page.goto("https://challanverification.finance.gov.bd/echalan/", timeout=30000)
-                        page.wait_for_timeout(1500)
+                        page.goto("https://challanverification.finance.gov.bd/echalan/", wait_until="networkidle", timeout=30000)
+                        page.wait_for_timeout(1000)
 
-                        inputs = page.query_selector_all("input[type='text']")
+                        # আইফ্রেম থাকলে সেটি ধরা, না থাকলে মূল পেজ নেওয়া
+                        frame = page.main_frame
+                        if len(page.frames) > 1:
+                            for f in page.frames:
+                                if "echalan" in f.url or f.query_selector("input"):
+                                    frame = f
+                                    break
+
+                        inputs = frame.query_selector_all("input[type='text']")
                         if len(inputs) >= 2:
                             inputs[0].click()
-                            inputs[0].fill("")
-                            inputs[0].type(c1, delay=50)
-
+                            inputs[0].fill(c1)
                             inputs[1].click()
-                            inputs[1].fill("")
-                            inputs[1].type(c2, delay=50)
+                            inputs[1].fill(c2)
 
                             page.wait_for_timeout(500)
 
-                            # ভেরিফাই বাটনে ক্লিক
-                            verify_btn = page.query_selector("input[value='Verify']")
+                            # ফর্ম সাবমিট করা
+                            verify_btn = frame.query_selector("input[value='Verify']")
                             if verify_btn:
                                 verify_btn.click()
                             else:
                                 inputs[1].press("Enter")
 
-                            # ডাটা লোড হওয়ার জন্য অপেক্ষা
-                            page.wait_for_timeout(4000)
+                            # ডাটা রেসপন্সের জন্য অপেক্ষা
+                            page.wait_for_timeout(3500)
 
-                        # ফলাফল সংগ্রহ
-                        tds = page.query_selector_all("td")
+                        # রেজাল্ট টেবিল রিড করা
+                        tds = frame.query_selector_all("td")
                         texts = [td.inner_text().strip() for td in tds if td.inner_text().strip()]
 
-                        if len(texts) >= 5:
+                        # ডাটা রিড নিশ্চিত করা
+                        if len(texts) >= 5 and "N/A" not in texts[0]:
                             row_data = {
                                 "চালান নং": clean_chl,
-                                "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": texts[0] if len(texts) > 0 else "N/A",
+                                "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": texts[0],
                                 "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": texts[1] if len(texts) > 1 else "N/A",
                                 "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": texts[2] if len(texts) > 2 else "N/A",
                                 "চালান নং (ওয়েবসাইট)": texts[3] if len(texts) > 3 else clean_chl,
@@ -145,11 +147,11 @@ if uploaded_file is not None:
                     if not row_data:
                         row_data = {
                             "চালান নং": clean_chl,
-                            "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": "N/A",
+                            "যে সরকারি প্রতিষ্ঠানের অনুকূলে অর্থ জমা হচ্ছে": "ডাটা পাওয়া যায়নি/সঠিক নয়",
                             "যার মাধ্যমে টাকা আদায় হলো (নাম ও সনাক্তকরণ)": "N/A",
                             "যার পক্ষ হতে টাকা প্রদান হলো (নাম ও ঠিকানা)": "N/A",
                             "চালান নং (ওয়েবসাইট)": clean_chl,
-                            "কি বাবদ জমা দেওয়া হলো তার বিবরণ": "ডাটা পাওয়া যায়নি/সঠিক নয়",
+                            "কি বাবদ জমা দেওয়া হলো তার বিবরণ": "N/A",
                             "জমার পরিমাণ": "N/A"
                         }
 
