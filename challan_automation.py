@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import glob
 import pandas as pd
 import pdfplumber
 from bs4 import BeautifulSoup
@@ -10,6 +11,14 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+
+def find_pdf_file():
+    """ফোল্ডারে থাকা যেকোনো PDF ফাইল খুঁজে বের করবে"""
+    pdf_files = glob.glob("*.pdf")
+    if not pdf_files:
+        return None
+    # যদি একাধিক PDF থাকে, প্রথমটি নিয়ে কাজ করবে
+    return pdf_files[0]
 
 def extract_challan_numbers(pdf_path):
     challan_list = []
@@ -31,7 +40,6 @@ def create_fresh_driver():
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
-    # ছবি লোড বন্ধ রেখে প্রসেস দ্রুত রাখা
     options.add_experimental_option("prefs", {"profile.managed_default_content_settings.images": 2})
     
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
@@ -84,7 +92,6 @@ def process_single_challan(driver, part1, part2):
     driver.get("https://challanverification.finance.gov.bd/echalan/")
     main_window = driver.current_window_handle
 
-    # আইফ্রেম লোড হওয়া পর্যন্ত ওয়েট
     WebDriverWait(driver, 12).until(EC.presence_of_all_elements_located((By.TAG_NAME, "iframe")))
     iframes = driver.find_elements(By.TAG_NAME, "iframe")
     if len(iframes) > 0:
@@ -105,7 +112,6 @@ def process_single_challan(driver, part1, part2):
     btn = driver.find_element(By.XPATH, '(//input[@value="Verify"])[last()]')
     driver.execute_script("arguments[0].click();", btn)
 
-    # পপ-আপ খোলার অপেক্ষা
     WebDriverWait(driver, 12).until(lambda d: len(d.window_handles) > 1)
 
     all_windows = driver.window_handles
@@ -115,17 +121,15 @@ def process_single_challan(driver, part1, part2):
                 driver.switch_to.window(win)
                 break
 
-        time.sleep(2.5)  # পপ-আপের ডেটা লোড হওয়ার জন্য পর্যাপ্ত সময়
+        time.sleep(2.5)
 
         if "conflict" in driver.page_source.lower():
             return None
 
-        # পপ-আপের ভেতরে আইফ্রেম থাকলে স্যুইচ
         popup_iframes = driver.find_elements(By.TAG_NAME, "iframe")
         if len(popup_iframes) > 0:
             driver.switch_to.frame(popup_iframes[0])
 
-        # টেবিল রেন্ডার নিশ্চিত করা
         try:
             WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.TAG_NAME, "table")))
         except Exception:
@@ -159,20 +163,30 @@ def process_challan_with_smart_retry(part1, part2, max_retries=4):
                     pass
         
         if attempt < max_retries:
-            wait_time = attempt * 2.5  # প্রগতিশীল ওয়েটিং টাইম (2.5s, 5.0s, 7.5s...)
+            wait_time = attempt * 2.5
             print(f"   -> [চালান {full_challan_no}] পুনঃচেষ্টা করা হচ্ছে ({attempt}/{max_retries}) - {wait_time}s বিরতি...")
             time.sleep(wait_time)
 
     return None
 
-def run_automation(source_pdf_path, output_excel_path):
+def run_automation():
+    # অটোমেটিক যেকোনো PDF ফাইল খোঁজা
+    source_pdf_path = find_pdf_file()
+    
+    if not source_pdf_path:
+        print("\n[ERROR] ফোল্ডারে কোনো PDF ফাইল পাওয়া যায়নি!")
+        print("দয়া করে চালানের PDF ফাইলটি এই ফোল্ডারে রেখে আবার run.bat চালু করুন।")
+        return
+
+    print(f"\nপাওয়া গেছে PDF ফাইল: '{source_pdf_path}'")
     challans = extract_challan_numbers(source_pdf_path)
     
-    # 📌 ৮টি চালানের টেস্ট রান
-    challans = challans[:4]
-    
     total_challans = len(challans)
-    print(f"১০০% পারফেক্ট টেস্ট রান: মোট {total_challans} টি চালান প্রসেস শুরু হচ্ছে...\n")
+    if total_challans == 0:
+        print("[ERROR] এই PDF ফাইল থেকে কোনো চালানের নম্বর পাওয়া যায়নি।")
+        return
+
+    print(f"সম্পূর্ণ প্রসেস শুরু হচ্ছে: মোট {total_challans} টি চালান...\n")
 
     final_data = []
 
@@ -198,10 +212,10 @@ def run_automation(source_pdf_path, output_excel_path):
         else:
             print(f"   ✗ চালান {full_challan_no} ডাটা পাওয়া যায়নি বা ভ্যালিড নয়।")
 
-        # প্রতিটি চালানের পর ২ সেকেন্ড বিরতি যাতে সার্ভার ব্লক না করে
         time.sleep(2)
 
     if final_data:
+        output_excel_path = "Verified_Challan_Data.xlsx"
         try:
             df = pd.DataFrame(final_data)
             df.to_excel(output_excel_path, index=False)
@@ -212,6 +226,4 @@ def run_automation(source_pdf_path, output_excel_path):
             print(f"\nমেইন ফাইল খোলা থাকায় ব্যাকআপ ফাইলে সেভ করা হয়েছে: {backup_file}")
 
 if __name__ == "__main__":
-    SOURCE_PDF = "individual 09-09-2026.pdf"
-    OUTPUT_EXCEL = "Verified_Challan_Data.xlsx"
-    run_automation(SOURCE_PDF, OUTPUT_EXCEL)
+    run_automation()
