@@ -1,5 +1,6 @@
-streamlit
-pdfplumber
 pandas
 openpyxl
-playwright
+pdfplumber
+beautifulsoup4
+selenium
+webdriver-manager
