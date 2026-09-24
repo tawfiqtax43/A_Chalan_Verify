@@ -17,10 +17,10 @@ def find_pdf_file():
     pdf_files = glob.glob("*.pdf")
     if not pdf_files:
         return None
-    # যদি একাধিক PDF থাকে, প্রথমটি নিয়ে কাজ করবে
     return pdf_files[0]
 
 def extract_challan_numbers(pdf_path):
+    """PDF থেকে সমস্ত চালানের নম্বর বের করবে"""
     challan_list = []
     pattern = r'CHL:\s*(\d{4})-(\d+)'
     
@@ -49,11 +49,26 @@ def parse_popup_precise(html_source, full_challan_no):
     soup = BeautifulSoup(html_source, 'html.parser')
     
     col1, col2, col3, col4, col5, col6, challan_date = "", "", "", full_challan_no, "", "", ""
+    section_info = ""
 
     full_text = soup.get_text()
+    
+    # চালানের তারিখ খুঁজে বের করা
     date_match = re.search(r'তারিখ\s*:\s*([\d\/]+)', full_text)
     if date_match:
         challan_date = date_match.group(1)
+
+    # ধারা খুঁজে বের করা ("আয়কর" কথাটি বাদ দিয়ে কেবল ধারা অংশ)
+    section_match = re.search(r'(?:আয়কর\s*)?(ধারা\s*[\d\w\s]+অনুগামী|ধারা\s*[\d\w\s]+অনুযায়ী)', full_text)
+    if section_match:
+        section_info = section_match.group(1).strip()
+    else:
+        # বিকল্প হিসেবে "অন্যান্য বিবরণ/মন্তব্য" অংশ থেকে এক্সট্র্যাক্ট করা
+        remark_match = re.search(r'অন্যান্য বিবরণ\/মন্তব্য\s*\(যদি থাকে\)\s*:\s*(.*?)(?=\s*মোট|\s*টাকা|\s*তারিখ|$)', full_text)
+        if remark_match:
+            text_val = remark_match.group(1).strip()
+            # 'আয়কর' শব্দ থাকলে তা মুছে ফেলা
+            section_info = re.sub(r'আয়কর\s*', '', text_val).strip()
 
     tables = soup.find_all('table')
     target_row = None
@@ -84,7 +99,8 @@ def parse_popup_precise(html_source, full_challan_no):
         "col4": col4,
         "col5": col5,
         "col6": col6,
-        "date": challan_date
+        "date": challan_date,
+        "section": section_info
     }
 
 def process_single_challan(driver, part1, part2):
@@ -164,18 +180,17 @@ def process_challan_with_smart_retry(part1, part2, max_retries=4):
         
         if attempt < max_retries:
             wait_time = attempt * 2.5
-            print(f"   -> [চালান {full_challan_no}] পুনঃচেষ্টা করা হচ্ছে ({attempt}/{max_retries}) - {wait_time}s বিরতি...")
+            print(f"    -> [চালান {full_challan_no}] পুনঃচেষ্টা করা হচ্ছে ({attempt}/{max_retries}) - {wait_time}s বিরতি...")
             time.sleep(wait_time)
 
     return None
 
 def run_automation():
-    # অটোমেটিক যেকোনো PDF ফাইল খোঁজা
     source_pdf_path = find_pdf_file()
     
     if not source_pdf_path:
-        print("\n[ERROR] ফোল্ডারে কোনো PDF ফাইল পাওয়া যায়নি!")
-        print("দয়া করে চালানের PDF ফাইলটি এই ফোল্ডারে রেখে আবার run.bat চালু করুন।")
+        print("\n[ERROR] ফোল্ডারে কোনো PDF ফাইল পাওয়া যায়নি!")
+        print("দয়া করে চালানের PDF ফাইলটি এই ফোল্ডারে রেখে আবার run.bat চালু করুন।")
         return
 
     print(f"\nপাওয়া গেছে PDF ফাইল: '{source_pdf_path}'")
@@ -183,7 +198,7 @@ def run_automation():
     
     total_challans = len(challans)
     if total_challans == 0:
-        print("[ERROR] এই PDF ফাইল থেকে কোনো চালানের নম্বর পাওয়া যায়নি।")
+        print("[ERROR] এই PDF ফাইল থেকে কোনো চালানের নম্বর পাওয়া যায়নি।")
         return
 
     print(f"সম্পূর্ণ প্রসেস শুরু হচ্ছে: মোট {total_challans} টি চালান...\n")
@@ -205,12 +220,13 @@ def run_automation():
                 "৩. যে ব্যক্তির/প্রতিষ্ঠানের পক্ষ হতে টাকা প্রদত্ত হলো তার নাম, সনাক্তকরণ নম্বর ও ঠিকানা": parsed["col3"],
                 "৪. চালান নং": parsed["col4"],
                 "৫. কি বাবদ জমা দেওয়া হলো তার বিবরণ": parsed["col5"],
-                "৬. জমার পরিমাণ": parsed["col6"]
+                "৬. জমার পরিমাণ": parsed["col6"],
+                "ধারার তথ্য / মন্তব্য": parsed["section"]
             }
             final_data.append(row)
-            print(f"   ✓ চালান {full_challan_no} সফলভাবে সংগৃহীত (তারিখ: {parsed['date']})")
+            print(f"    ✓ চালান {full_challan_no} সফলভাবে সংগৃহীত (তারিখ: {parsed['date']}, ধারা: {parsed['section']})")
         else:
-            print(f"   ✗ চালান {full_challan_no} ডাটা পাওয়া যায়নি বা ভ্যালিড নয়।")
+            print(f"    ✗ চালান {full_challan_no} ডাটা পাওয়া যায়নি বা ভ্যালিড নয়।")
 
         time.sleep(2)
 
