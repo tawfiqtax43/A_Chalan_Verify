@@ -4,6 +4,7 @@ import time
 import glob
 import pandas as pd
 import pdfplumber
+from datetime import datetime
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -19,19 +20,120 @@ def find_pdf_file():
         return None
     return pdf_files[0]
 
-def extract_challan_numbers(pdf_path):
-    """PDF থেকে সমস্ত চালানের নম্বর বের করবে"""
-    challan_list = []
-    pattern = r'CHL:\s*(\d{4})-(\d+)'
+def convert_bn_to_en_num(bn_str):
+    """বাংলা সংখ্যাকে ইংরেজিতে রূপান্তর করে"""
+    if not bn_str:
+        return ""
+    bn_digits = "০১২৩৪৫৬৭৮৯"
+    en_digits = "0123456789"
+    trans = str.maketrans(bn_digits, en_digits)
+    return str(bn_str).translate(trans)
+
+def parse_date_to_comparable(date_str):
+    """ভিন্ন ভিন্ন ফরম্যাটের তারিখকে YYYYMMDD এ রূপান্তর করে"""
+    if not date_str:
+        return None
+    date_str = convert_bn_to_en_num(date_str).strip()
+    
+    # 10-Nov-25 বা 10-Nov-2025 ফরম্যাট
+    try:
+        match_mon = re.search(r'(\d{1,2})[-/\s]([A-Za-z]{3})[-/\s](\d{2,4})', date_str)
+        if match_mon:
+            day = match_mon.group(1).zfill(2)
+            mon_str = match_mon.group(2).title()
+            yr = match_mon.group(3)
+            if len(yr) == 2:
+                yr = "20" + yr
+            dt = datetime.strptime(f"{day}-{mon_str}-{yr}", "%d-%b-%Y")
+            return dt.strftime("%Y%m%d")
+    except Exception:
+        pass
+
+    # DD/MM/YYYY বা DD-MM-YYYY ফরম্যাট
+    parts = re.split(r'[\/\.-]', date_str)
+    if len(parts) == 3:
+        day, month, year = parts[0].zfill(2), parts[1].zfill(2), parts[2]
+        if len(year) == 2:
+            year = "20" + year
+        return f"{year}{month}{day}"
+    return None
+
+def extract_challan_info_from_pdf(pdf_path):
+    """
+    PDF স্ক্যান করে চালান নম্বর, তারিখ ও টাকার পরিমাণ নিখুঁতভাবে বের করবে
+    """
+    challan_records = []
     
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                matches = re.findall(pattern, text)
-                for part1, part2 in matches:
-                    challan_list.append((part1, part2))
-    return challan_list
+        for page_num, page in enumerate(pdf.pages, start=1):
+            words = page.extract_words()
+            if not words:
+                continue
+
+            # শব্দগুলোকে Y-পজিশন অনুযায়ী সর্ট করা
+            sorted_words = sorted(words, key=lambda w: w['top'])
+            
+            # CHL প্রাপ্তির ব্লক তৈরি করা
+            chl_blocks = []
+            for w in sorted_words:
+                if "CHL:" in w['text']:
+                    chl_blocks.append({'word': w, 'top': w['top']})
+            
+            if not chl_blocks:
+                continue
+
+            # প্রতিটি CHL চালানের জন্য উল্লম্ব রেঞ্জ (Vertical Region) নির্ধারণ করা
+            for i in range(len(chl_blocks)):
+                curr_block = chl_blocks[i]
+                curr_top = curr_block['top'] - 5  # কিছুটা ছাড়
+                
+                # পরবর্তী চালান না আসা পর্যন্ত বা পেজের শেষ পর্যন্ত সীমানা
+                if i + 1 < len(chl_blocks):
+                    next_top = chl_blocks[i + 1]['top'] - 5
+                else:
+                    next_top = curr_top + 45  # এক রো-এর অনুমিত উচ্চতা
+
+                # সীমানার ভেতরের সব শব্দ সংগ্রহ
+                block_words = [w for w in sorted_words if curr_top <= w['top'] < next_top]
+                block_text = " ".join([w['text'] for w in sorted_words if curr_top <= w['top'] < next_top])
+
+                # চালান নম্বর মেলাতে
+                match = re.search(r'CHL:\s*(\d{4})-(\d+)', block_text)
+                if match:
+                    part1, part2 = match.group(1), match.group(2)
+                    full_no = f"{part1}-{part2}"
+                    
+                    date_found = None
+                    amount_found = 0.0
+                    
+                    # তারিখ
+                    d_match = re.search(r'(\d{1,2}[-/\s][A-Za-z]{3}[-/\s]\d{2,4}|\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4})', block_text)
+                    if d_match:
+                        date_found = d_match.group(1)
+                    
+                    # টাকার পরিমাণ (যেমন: 200,000.00 বা 342,624.00)
+                    amounts = re.findall(r'([\d,০-৯]+\.\d{2})', block_text)
+                    if amounts:
+                        # সাধারণত ডানদিকের টাকার সংখ্যাটি বড় হয়
+                        for raw_amt in reversed(amounts):
+                            clean_amt = convert_bn_to_en_num(raw_amt).replace(',', '')
+                            try:
+                                val = float(clean_amt)
+                                if val > 0:
+                                    amount_found = val
+                                    break
+                            except ValueError:
+                                pass
+                            
+                    challan_records.append({
+                        "part1": part1,
+                        "part2": part2,
+                        "full_no": full_no,
+                        "pdf_date": date_found,
+                        "pdf_amount": amount_found
+                    })
+                    
+    return challan_records
 
 def create_fresh_driver():
     options = webdriver.ChromeOptions()
@@ -53,21 +155,18 @@ def parse_popup_precise(html_source, full_challan_no):
 
     full_text = soup.get_text()
     
-    # চালানের তারিখ খুঁজে বের করা
     date_match = re.search(r'তারিখ\s*:\s*([\d\/]+)', full_text)
     if date_match:
         challan_date = date_match.group(1)
 
-    # ধারা খুঁজে বের করা ("আয়কর" কথাটি বাদ দিয়ে কেবল ধারা অংশ)
+    # "আয়কর" কথাটি বাদ দিয়ে কেবল "ধারা..." অংশ এক্সট্র্যাক্ট করা
     section_match = re.search(r'(?:আয়কর\s*)?(ধারা\s*[\d\w\s]+অনুগামী|ধারা\s*[\d\w\s]+অনুযায়ী)', full_text)
     if section_match:
         section_info = section_match.group(1).strip()
     else:
-        # বিকল্প হিসেবে "অন্যান্য বিবরণ/মন্তব্য" অংশ থেকে এক্সট্র্যাক্ট করা
         remark_match = re.search(r'অন্যান্য বিবরণ\/মন্তব্য\s*\(যদি থাকে\)\s*:\s*(.*?)(?=\s*মোট|\s*টাকা|\s*তারিখ|$)', full_text)
         if remark_match:
             text_val = remark_match.group(1).strip()
-            # 'আয়কর' শব্দ থাকলে তা মুছে ফেলা
             section_info = re.sub(r'আয়কর\s*', '', text_val).strip()
 
     tables = soup.find_all('table')
@@ -194,20 +293,82 @@ def run_automation():
         return
 
     print(f"\nপাওয়া গেছে PDF ফাইল: '{source_pdf_path}'")
-    challans = extract_challan_numbers(source_pdf_path)
+    print("PDF ফাইল স্ক্যান করে চালানের তথ্য বিশ্লেষণ করা হচ্ছে...")
     
-    total_challans = len(challans)
+    records = extract_challan_info_from_pdf(source_pdf_path)
+    total_challans = len(records)
+    
     if total_challans == 0:
         print("[ERROR] এই PDF ফাইল থেকে কোনো চালানের নম্বর পাওয়া যায়নি।")
         return
 
-    print(f"সম্পূর্ণ প্রসেস শুরু হচ্ছে: মোট {total_challans} টি চালান...\n")
+    print(f"\n---> স্ক্যান সম্পন্ন! মোট {total_challans} টি চালান পাওয়া গেছে। <---")
+    
+    dates_found = [r['pdf_date'] for r in records if r['pdf_date']]
+    amounts_found = [r['pdf_amount'] for r in records if r['pdf_amount'] > 0]
+    
+    if dates_found:
+        print(f"পাওয়া গেছে তারিখের নমুনা: {', '.join(list(set(dates_found))[:5])} ...")
+    if amounts_found:
+        print(f"সর্বনিম্ন টাকার পরিমাণ: {min(amounts_found):,.2f} | সর্বোচ্চ টাকার পরিমাণ: {max(amounts_found):,.2f}")
+
+    print("\n" + "="*50)
+    print("ভেরিফিকেশন ফিল্টার অপশন সিলেক্ট করুন:")
+    print("১. তারিখ (Date) অনুযায়ী ফিল্টার")
+    print("২. জমার পরিমাণ (Amount) অনুযায়ী ফিল্টার")
+    print("৩. কোনো ফিল্টার ছাড়া (সবগুলো চালান ভেরিফাই করবেন)")
+    print("="*50)
+    
+    choice = input("আপনার পছন্দ টাইপ করুন (1/2/3): ").strip()
+    
+    selected_records = []
+    
+    if choice == '1':
+        print("\n[তারিখ ফিল্টার নির্বাচিত]")
+        start_date_in = input("শুরুর তারিখ লিখুন (যেমন: 10-Nov-25 বা 10/11/2025): ").strip()
+        end_date_in = input("শেষের তারিখ লিখুন (যেমন: 30-Nov-25 বা 30/11/2025): ").strip()
+        
+        start_cmp = parse_date_to_comparable(start_date_in)
+        end_cmp = parse_date_to_comparable(end_date_in)
+        
+        for r in records:
+            r_cmp = parse_date_to_comparable(r['pdf_date'])
+            if r_cmp and start_cmp and end_cmp:
+                if start_cmp <= r_cmp <= end_cmp:
+                    selected_records.append(r)
+            else:
+                selected_records.append(r)
+                
+    elif choice == '2':
+        print("\n[এমাউন্ট ফিল্টার নির্বাচিত]")
+        try:
+            min_amt = float(input("সর্বনিম্ন টাকার পরিমাণ (Min Amount): ").strip())
+            max_amt = float(input("সর্বোচ্চ টাকার পরিমাণ (Max Amount): ").strip())
+            
+            for r in records:
+                if min_amt <= r['pdf_amount'] <= max_amt:
+                    selected_records.append(r)
+        except ValueError:
+            print("[WARNING] ভুল সংখ্যা ইনপুট দিয়েছেন! ফিল্টার ছাড়া সবগুলো চালান ধরা হচ্ছে।")
+            selected_records = records
+            
+    else:
+        print("\n[সবগুলো চালান ভেরিফাই করা হবে]")
+        selected_records = records
+
+    filtered_count = len(selected_records)
+    if filtered_count == 0:
+        print("\n[INFO] ফিল্টারের শর্ত অনুযায়ী কোনো চালান পাওয়া যায়নি। প্রোগ্রাম শেষ হচ্ছে।")
+        return
+
+    print(f"\nফিল্টার অনুযায়ী মোট {filtered_count} টি চালান ভেরিফাই করা হবে। শুরু হচ্ছে...\n")
 
     final_data = []
 
-    for idx, (part1, part2) in enumerate(challans, start=1):
-        full_challan_no = f"{part1}-{part2}"
-        print(f"[{idx}/{total_challans}] চালান {full_challan_no} প্রসেস হচ্ছে...")
+    for idx, r in enumerate(selected_records, start=1):
+        part1, part2 = r['part1'], r['part2']
+        full_challan_no = r['full_no']
+        print(f"[{idx}/{filtered_count}] চালান {full_challan_no} প্রসেস হচ্ছে...")
         
         parsed = process_challan_with_smart_retry(part1, part2)
 
